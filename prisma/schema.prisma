@@ -6,8 +6,6 @@ generator client {
   provider = "prisma-client-js"
 }
 
-
-
 model License {
   id        String   @id @default(cuid())
   key       String   @unique

@@ -1,6 +1,4 @@
-import type { Device, License, LicenseDetail, LogItem } from "./types";
-import { NextResponse } from "next/server";
-
+import { prisma } from "./prisma";
 
 function nowISO() {
   return new Date().toISOString();
@@ -10,165 +8,150 @@ function uid(prefix = "") {
   return prefix + Math.random().toString(16).slice(2) + Date.now().toString(16);
 }
 
+type LogItem = {
+  id: string;
+  level: "info" | "warn" | "error";
+  event: string;
+  payload?: any;
+  created_at: string;
+};
+
+const g = globalThis as any;
+if (!g.__ADMIN_LOGS__) g.__ADMIN_LOGS__ = [] as LogItem[];
+const logs: LogItem[] = g.__ADMIN_LOGS__;
+
+export function addLog(level: LogItem["level"], event: string, payload?: any) {
+  logs.unshift({ id: uid("log_"), level, event, payload, created_at: nowISO() });
+  if (logs.length > 1000) logs.length = 1000;
+}
+
+export function listLogs(): LogItem[] {
+  return logs;
+}
+
 function randomKey() {
   return "LIC-" + Math.random().toString(36).slice(2, 10).toUpperCase();
 }
 
-type DB = {
-  licenses: Record<string, License>;
-  devices: Record<string, Device[]>;
-  logs: LogItem[];
-};
+/**
+ * ADMIN: cria licença com duração em dias (Prisma/Neon)
+ */
+export async function createLicense(input: { plan: "basic" | "pro"; duration_days: number }) {
+  const days = Number.isFinite(input.duration_days) && input.duration_days > 0 ? input.duration_days : 30;
+  const expiresAt = new Date(Date.now() + days * 86400000);
 
-const g = globalThis as any;
+  const lic = await prisma.license.create({
+    data: {
+      key: randomKey(),
+      plan: input.plan,
+      banned: false,
+      expiresAt,
+      hwid: null,
+    },
+  });
 
-if (!g.__ADMIN_DB__) {
-  g.__ADMIN_DB__ = {
-    licenses: {},
-    devices: {},
-    logs: [{ id: uid("log_"), level: "info", event: "admin_panel_boot", created_at: nowISO() }],
-  } satisfies DB;
-}
+  addLog("info", "license_created", { id: lic.id, key: lic.key, plan: lic.plan, duration_days: days });
 
-const db: DB = g.__ADMIN_DB__;
-
-export function addLog(level: LogItem["level"], event: string, payload?: any) {
-  db.logs.unshift({ id: uid("log_"), level, event, payload, created_at: nowISO() });
-  db.logs = db.logs.slice(0, 1000);
-}
-
-export function listLogs(): LogItem[] {
-  return db.logs;
-}
-
-export function listLicenses(): License[] {
-  return Object.values(db.licenses).sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  return {
+    id: lic.id,
+    key: lic.key,
+    plan: (lic.plan ?? "basic") as "basic" | "pro",
+    created_at: lic.createdAt.toISOString(),
+    expires_at: lic.expiresAt ? lic.expiresAt.toISOString() : expiresAt.toISOString(),
+    max_devices: 1,
+    is_banned: lic.banned,
+    ban_reason: null,
+    bound_hwid_hash: lic.hwid ?? null,
+    last_seen_at: null,
+  };
 }
 
 /**
- * ADMIN: cria licença com duração em dias
+ * ADMIN: lista licenças (Prisma/Neon)
  */
-export function createLicense(input: {
-  plan: "basic" | "pro";
-  duration_days: number;
-}): License {
-  const id = uid("lic_");
-  const created_at = nowISO();
+export async function listLicenses() {
+  const items = await prisma.license.findMany({
+    orderBy: { createdAt: "desc" },
+  });
 
-  const days = Number.isFinite(input.duration_days) && input.duration_days > 0 ? input.duration_days : 30;
-  const expires_at = new Date(Date.now() + days * 86400000).toISOString();
-
-  const lic: License = {
-    id,
-    key: randomKey(),
-    plan: input.plan,
-    created_at,
-    expires_at,
+  return items.map((l) => ({
+    id: l.id,
+    key: l.key,
+    plan: (l.plan ?? "basic") as "basic" | "pro",
+    created_at: l.createdAt.toISOString(),
+    expires_at: l.expiresAt ? l.expiresAt.toISOString() : null,
     max_devices: 1,
-    is_banned: false,
+    is_banned: l.banned,
     ban_reason: null,
-    bound_hwid_hash: null,
+    bound_hwid_hash: l.hwid ?? null,
     last_seen_at: null,
+  }));
+}
+
+/**
+ * ADMIN: detalhe licença (simples)
+ */
+export async function getLicenseDetail(id: string) {
+  const lic = await prisma.license.findUnique({ where: { id } });
+  if (!lic) return null;
+
+  return {
+    license: {
+      id: lic.id,
+      key: lic.key,
+      plan: (lic.plan ?? "basic") as "basic" | "pro",
+      created_at: lic.createdAt.toISOString(),
+      expires_at: lic.expiresAt ? lic.expiresAt.toISOString() : null,
+      max_devices: 1,
+      is_banned: lic.banned,
+      ban_reason: null,
+      bound_hwid_hash: lic.hwid ?? null,
+      last_seen_at: null,
+    },
+    devices: lic.hwid
+      ? [
+          {
+            id: uid("dev_"),
+            license_id: lic.id,
+            hwid_hash: lic.hwid,
+            device_name: null,
+            created_at: lic.createdAt.toISOString(),
+            last_seen_at: lic.updatedAt.toISOString(),
+          },
+        ]
+      : [],
   };
-
-  db.licenses[id] = lic;
-  db.devices[id] = [];
-  addLog("info", "license_created", { id, key: lic.key, plan: lic.plan, duration_days: days });
-  return lic;
 }
 
-export function getLicenseDetail(id: string): LicenseDetail | null {
-  const lic = db.licenses[id];
-  if (!lic) return null;
-  return { license: lic, devices: db.devices[id] ?? [] };
+export async function deleteLicense(id: string) {
+  try {
+    await prisma.license.delete({ where: { id } });
+    addLog("warn", "license_deleted", { id });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-export function deleteLicense(id: string): boolean {
-  if (!db.licenses[id]) return false;
-  delete db.licenses[id];
-  delete db.devices[id];
-  addLog("warn", "license_deleted", { id });
-  return true;
-}
+export async function setBan(id: string, banned: boolean) {
+  const lic = await prisma.license.update({
+    where: { id },
+    data: { banned },
+  });
 
-export function setBan(id: string, banned: boolean): License | null {
-  const lic = db.licenses[id];
-  if (!lic) return null;
-  lic.is_banned = banned;
-  lic.ban_reason = banned ? (lic.ban_reason ?? "manual_ban") : null;
-  addLog("warn", banned ? "license_banned" : "license_unbanned", { id, key: lic.key, reason: lic.ban_reason });
+  addLog("warn", banned ? "license_banned" : "license_unbanned", { id: lic.id, key: lic.key });
   return lic;
 }
 
 /**
  * ADMIN: resetar HWID (libera troca de PC)
  */
-export function resetHwid(id: string): boolean {
-  const lic = db.licenses[id];
-  if (!lic) return false;
+export async function resetHwid(id: string) {
+  await prisma.license.update({
+    where: { id },
+    data: { hwid: null, banned: false },
+  });
 
-  lic.bound_hwid_hash = null;
-  db.devices[id] = [];
-  addLog("warn", "license_hwid_reset", { id, key: lic.key });
+  addLog("warn", "license_hwid_reset", { id });
   return true;
-}
-
-/**
- * BOT: valida key + HWID
- * - primeiro HWID "gruda"
- * - se tentar outro HWID => ban automático
- * - se expirar => bloqueia
- */
-export function clientLoginByKey(params: { key: string; hwid_hash: string; device_name?: string | null }) {
-  const key = params.key.trim();
-  const hwid = params.hwid_hash.trim();
-
-  const lic = Object.values(db.licenses).find((l) => l.key === key);
-  if (!lic) {
-    addLog("warn", "client_login_invalid_key", { key });
-    return { ok: false as const, status: 401, error: "invalid_key" as const };
-  }
-
-  if (lic.is_banned) {
-    addLog("warn", "client_login_banned", { id: lic.id, key: lic.key, reason: lic.ban_reason });
-    return { ok: false as const, status: 403, error: "banned" as const };
-  }
-
-  const exp = Date.parse(lic.expires_at);
-  if (Number.isFinite(exp) && Date.now() > exp) {
-    addLog("warn", "client_login_expired", { id: lic.id, key: lic.key, expires_at: lic.expires_at });
-    return { ok: false as const, status: 403, error: "expired" as const };
-  }
-
-  // trava no primeiro HWID
-  if (!lic.bound_hwid_hash) {
-    lic.bound_hwid_hash = hwid;
-    addLog("info", "license_bound_first_hwid", { id: lic.id, key: lic.key, hwid_hash: hwid });
-  } else if (lic.bound_hwid_hash !== hwid) {
-    lic.is_banned = true;
-    lic.ban_reason = "hwid_mismatch";
-    addLog("error", "license_auto_banned_hwid_mismatch", {
-      id: lic.id,
-      key: lic.key,
-      expected: lic.bound_hwid_hash,
-      got: hwid,
-    });
-    return { ok: false as const, status: 403, error: "hwid_mismatch_banned" as const };
-  }
-
-  // registra device (single device)
-  const device: Device = {
-    id: uid("dev_"),
-    license_id: lic.id,
-    hwid_hash: hwid,
-    device_name: params.device_name ?? null,
-    created_at: nowISO(),
-    last_seen_at: nowISO(),
-  };
-  db.devices[lic.id] = [device];
-  lic.last_seen_at = nowISO();
-
-  addLog("info", "client_login_ok", { id: lic.id, key: lic.key });
-
-  return { ok: true as const, status: 200, license_id: lic.id };
 }
