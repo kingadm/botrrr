@@ -4,6 +4,9 @@ import { clientLoginByKey } from "@/lib/client_auth";
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
 
+  console.log("AUTH BODY:", body);
+  console.log("AUTH key:", body?.key, "hwid_hash:", body?.hwid_hash, "hwid:", body?.hwid, "device_name:", body?.device_name);
+
   const key = String(body?.key ?? "");
   const hwid_hash = String(body?.hwid_hash ?? body?.hwid ?? "");
   const device_name = body?.device_name ? String(body.device_name) : null;
