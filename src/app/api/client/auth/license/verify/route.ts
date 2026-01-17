@@ -3,65 +3,69 @@ import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
 
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
     const key = body?.key;
     const hwid = body?.hwid;
 
-    // ✅ valida payload
     if (!key || typeof key !== "string") {
-      return NextResponse.json({ ok: false, reason: "missing_key" }, { status: 400 });
+      return NextResponse.json({ ok: false, reason: "missing_key" }, { status: 400, headers: CORS_HEADERS });
     }
     if (!hwid || typeof hwid !== "string") {
-      return NextResponse.json({ ok: false, reason: "missing_hwid" }, { status: 400 });
+      return NextResponse.json({ ok: false, reason: "missing_hwid" }, { status: 400, headers: CORS_HEADERS });
     }
 
-    // ✅ busca a licença (somente campos que EXISTEM no seu schema)
     const license = await prisma.license.findFirst({
       where: { key },
       select: {
         id: true,
         banned: true,
         hwid: true,
+        // se você já criou as colunas no Neon:
+        plan: true,
+        expiresAt: true,
       },
     });
 
-    if (!license) {
-      return NextResponse.json({ ok: false, reason: "not_found" }, { status: 404 });
-    }
+    if (!license) return NextResponse.json({ ok: false, reason: "not_found" }, { status: 404, headers: CORS_HEADERS });
+    if (license.banned) return NextResponse.json({ ok: false, reason: "banned" }, { status: 403, headers: CORS_HEADERS });
 
-    if (license.banned) {
-      return NextResponse.json({ ok: false, reason: "banned" }, { status: 403 });
-    }
-
-    // ✅ HWID binding
-    // 1) se ainda não tem hwid gravado: registra esse pc
+    // bind HWID
     if (!license.hwid) {
-      await prisma.license.update({
-        where: { id: license.id },
-        data: { hwid },
-      });
+      await prisma.license.update({ where: { id: license.id }, data: { hwid } });
     } else if (license.hwid !== hwid) {
-      // 2) se já tem e é diferente: bloqueia
-      return NextResponse.json({ ok: false, reason: "hwid_mismatch" }, { status: 403 });
+      return NextResponse.json({ ok: false, reason: "hwid_mismatch" }, { status: 403, headers: CORS_HEADERS });
     }
 
-    // ✅ Como seu schema atual NÃO tem plan/expiresAt/device_name,
-    // retornamos defaults só pro bootstrap mostrar algo.
-    // Depois você adiciona esses campos no Prisma e troca aqui.
+    // expiração real
+    const exp = new Date((license as any).expiresAt).getTime();
+    if (!Number.isFinite(exp) || exp <= Date.now()) {
+      return NextResponse.json({ ok: false, reason: "expired" }, { status: 403, headers: CORS_HEADERS });
+    }
+
     return NextResponse.json(
       {
         ok: true,
         license_id: license.id,
-        plan: "basic",
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24h default
+        plan: (license as any).plan ?? "basic",
+        expiresAt: new Date((license as any).expiresAt).toISOString(),
         device_name: "PC",
       },
-      { status: 200 }
+      { status: 200, headers: CORS_HEADERS }
     );
   } catch (err) {
     console.error("verify route error:", err);
-    return NextResponse.json({ ok: false, reason: "server_error" }, { status: 500 });
+    return NextResponse.json({ ok: false, reason: "server_error" }, { status: 500, headers: CORS_HEADERS });
   }
 }
